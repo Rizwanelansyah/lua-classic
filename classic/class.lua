@@ -42,27 +42,6 @@ setmetatable(class_config, {
   end
 })
 
-local function clone(t, func)
-  if type(t) ~= "table" then return t end
-  local new = {}
-  for key, value in pairs(t) do
-    if func ~= nil then
-      new[key] = func(clone(value))
-    else
-      new[key] = clone(value)
-    end
-  end
-  local meta = getmetatable(t)
-  if meta then
-    local new_meta = {}
-    for key, value in pairs(meta) do
-      new_meta[key] = clone(value)
-    end
-    setmetatable(new, new_meta)
-  end
-  return new
-end
-
 local function ternary(condition, true_v, false_v)
   if condition then
     return true_v
@@ -109,16 +88,29 @@ local function self_index(class, self, key)
   if type(res) == "function" then return res end
   if res ~= nil then return _or(self_meta.__real_value[key], conv(res)) end
 
+  local err
   if not self_meta.__in_class and meta.__field.__private[key] then
-    error("'" .. key .. "' is private field")
+    err = "'" .. key .. "' is private field"
   end
 
   if meta.__static.__public[key] then
-    error("'" .. key .. "' is static field")
+    err = "'" .. key .. "' is static field"
   end
 
   if meta.__static.__private[key] then
-    error("'" .. key .. "' is static field")
+    err = "'" .. key .. "' is static field"
+  end
+
+  err = "no field with name '" .. key .. "'"
+  if meta.__parent then
+    local ok, val = pcall(self_index, meta.__parent, self, key)
+    if ok then
+      return val
+    end
+    err = val
+  end
+  if err then
+    error(err)
   end
 end
 
@@ -146,16 +138,30 @@ local function self_newindex(class, self, key, value)
     self_meta.__real_value[key] = value
     return
   end
+
+  local err
   if not self_meta.__in_class and meta.__field.__private[key] then
-    error("'" .. key .. "' is private field")
+    err = "'" .. key .. "' is private field"
   end
 
   if meta.__static.__public[key] then
-    error("'" .. key .. "' is static field")
+    err = "'" .. key .. "' is static field"
   end
 
   if meta.__static.__private[key] then
-    error("'" .. key .. "' is static field")
+    err = "'" .. key .. "' is static field"
+  end
+
+  err = "no field with name '" .. key .. "'"
+  if meta.__parent then
+    local ok, val = pcall(self_newindex, meta.__parent, self, key, value)
+    if ok then
+      return val
+    end
+    err = val
+  end
+  if err then
+    error(err)
   end
 end
 
@@ -185,6 +191,144 @@ local function new(class, ...)
   return self
 end
 
+local function class_newindex(as_class, class, key, value)
+  local meta = getmetatable(as_class) or {}
+  local orig_meta = getmetatable(class) or {}
+
+  if not orig_meta.__locked then
+    if type(value) == "function" then
+      local func
+      if visibility.on == '__field' or special_method[key] then
+        func = function(...)
+          local in_classes = {}
+          for i, self in ipairs { ... } do
+            local meta = getmetatable(self or {}) or {}
+            if class_match(meta.__class, class) then
+              in_classes[i] = meta.__in_class
+              if not in_classes[i] then meta.__in_class = true end
+            end
+          end
+
+          local res = value(...)
+
+          for i, self in ipairs { ... } do
+            local meta = getmetatable(self or {}) or {}
+            if class_match(meta.__class, class) then
+              if not in_classes[i] then meta.__in_class = false end
+            end
+          end
+          return res
+        end
+      else
+        func = value
+      end
+      func = make_do_in(class, func)
+      local parent = orig_meta.__parent
+      while parent do
+        func = make_do_in(parent, func)
+        parent = getmetatable(parent).__parent
+      end
+      orig_meta[ternary(special_method[key], '__field', visibility.on)][ternary(special_method[key], '__public', visibility.mod)][key] =
+          func
+    else
+      meta[visibility.on][visibility.mod][key] = _or(value, null)
+    end
+    return
+  end
+
+  local res
+  if meta.__in_class then
+    res = meta.__static.__private[key]
+    if res ~= nil then
+      orig_meta.__real_value[key] = value
+      return
+    end
+  end
+
+  res = meta.__static.__public[key]
+  if res ~= nil then
+    orig_meta.__real_value[key] = value
+    return
+  end
+
+  local err
+  if not meta.__in_class and meta.__static.__private[key] then
+    err = "'" .. key .. "' is private field"
+  end
+
+  if meta.__field.__private[key] then
+    err = "'" .. key .. "' is not static field"
+  end
+
+  if meta.__field.__public[key] then
+    err = "'" .. key .. "' is not static field"
+  end
+
+  err = "no field with name '" .. key .. "'"
+  if meta.__parent then
+    local ok, val = pcall(class_newindex, meta.__parent, class, key, value)
+    if ok then
+      return val
+    end
+    err = val
+  end
+  if err then
+    error(err)
+  end
+end
+
+local function class_index(as_class, class, key)
+  local meta = getmetatable(as_class)
+  local orig_meta = getmetatable(class)
+  if key == 'new' then
+    return function(...)
+      return new(class, ...)
+    end
+  end
+
+  local res
+  if meta.__in_class then
+    res = meta.__field.__private[key]
+    if type(res) == "function" then return res end
+
+    res = meta.__static.__private[key]
+    if type(res) == "function" then return res end
+    if res ~= nil then return orig_meta.__real_value[key] or conv(res) end
+  end
+
+  res = meta.__field.__public[key]
+  if type(res) == "function" then return res end
+
+  res = meta.__static.__public[key]
+  if type(res) == "function" then return res end
+  if res ~= nil then return orig_meta.__real_value[key] or conv(res) end
+
+  local err
+  if not meta.__in_class and meta.__static.__private[key] then
+    err = "'" .. key .. "' is private field"
+  end
+
+  if meta.__field.__private[key] then
+    err = "'" .. key .. "' is not static field"
+  end
+
+  if meta.__field.__public[key] then
+    err = "'" .. key .. "' is not static field"
+  end
+
+  err = "no field with name '" .. key .. "'"
+  if meta.__parent then
+    local ok, val = pcall(class_index, meta.__parent, class, key)
+    if ok then
+      return val
+    end
+    err = val
+  end
+  if err then
+    error(err)
+  end
+end
+
 ---create a new class on {c}
 ---this function doesn't return any value
 ---this function modify {c} as class
@@ -210,155 +354,14 @@ local function make_class(c, func, func2)
 
   if type(func) == "table" then
     meta.__parent = func
-    local parent_meta = getmetatable(func) or {}
-    if parent_meta.__field then
-      meta.__field.__public = clone(parent_meta.__field.__public, function(v)
-        local f = function(...)
-          local in_classes = {}
-          for i, self in ipairs { ... } do
-            local meta = getmetatable(self or {}) or {}
-            if class_match(meta.__class, c) then
-              in_classes[i] = meta.__in_class
-              if not in_classes[i] then meta.__in_class = true end
-            end
-          end
-
-          local res = v(...)
-
-          for i, self in ipairs { ... } do
-            local meta = getmetatable(self or {}) or {}
-            if class_match(meta.__class, c) then
-              if not in_classes[i] then meta.__in_class = false end
-            end
-          end
-          return res
-        end
-        if type(v) == "function" then
-          return make_do_in(c, f)
-        else
-          return v
-        end
-      end)
-      meta.__field.__private = clone(parent_meta.__field.__private)
-    end
-
-    if parent_meta.__static then
-      meta.__static.__public = clone(parent_meta.__static.__public, function(v)
-        if type(v) == "function" then
-          return make_do_in(c, v)
-        else
-          return v
-        end
-      end)
-
-      meta.__static.__private = clone(parent_meta.__static.__private)
-    end
   end
 
   function meta.__newindex(class, key, value)
-    if not meta.__locked then
-      if type(value) == "function" then
-        local func
-        if visibility.on == '__field' or special_method[key] then
-          func = function(...)
-            local in_classes = {}
-            for i, self in ipairs { ... } do
-              local meta = getmetatable(self or {}) or {}
-              if class_match(meta.__class, class) then
-                in_classes[i] = meta.__in_class
-                if not in_classes[i] then meta.__in_class = true end
-              end
-            end
-
-            local res = value(...)
-
-            for i, self in ipairs { ... } do
-              local meta = getmetatable(self or {}) or {}
-              if class_match(meta.__class, class) then
-                if not in_classes[i] then meta.__in_class = false end
-              end
-            end
-            return res
-          end
-        else
-          func = value
-        end
-        func = make_do_in(class, func)
-        local parent = meta.__parent
-        while parent do
-          func = make_do_in(parent, func)
-          parent = getmetatable(parent).__parent
-        end
-        meta[ternary(special_method[key], '__field', visibility.on)][ternary(special_method[key], '__public', visibility.mod)][key] = func
-      else
-        meta[visibility.on][visibility.mod][key] = _or(value, null)
-      end
-      return
-    end
-
-    local res
-    if meta.__in_class then
-      res = meta.__static.__private[key]
-      if res ~= nil then
-        meta.__real_value[key] = value
-        return
-      end
-    end
-
-    res = meta.__static.__public[key]
-    if res ~= nil then
-      meta.__real_value[key] = value
-      return
-    end
-
-    if not meta.__in_class and meta.__static.__private[key] then
-      error("'" .. key .. "' is private field")
-    end
-
-    if meta.__field.__private[key] then
-      error("'" .. key .. "' is not static field")
-    end
-
-    if meta.__field.__public[key] then
-      error("'" .. key .. "' is not static field")
-    end
+    return class_newindex(class, class, key, value)
   end
 
   function meta.__index(class, key)
-    if key == 'new' then
-      return function(...)
-        return new(class, ...)
-      end
-    end
-
-    local res
-    if meta.__in_class then
-      res = meta.__field.__private[key]
-      if type(res) == "function" then return res end
-
-      res = meta.__static.__private[key]
-      if type(res) == "function" then return res end
-      if res ~= nil then return meta.__real_value[key] or conv(res) end
-    end
-
-    res = meta.__field.__public[key]
-    if type(res) == "function" then return res end
-
-    res = meta.__static.__public[key]
-    if type(res) == "function" then return res end
-    if res ~= nil then return meta.__real_value[key] or conv(res) end
-
-    if not meta.__in_class and meta.__static.__private[key] then
-      error("'" .. key .. "' is private field")
-    end
-
-    if meta.__field.__private[key] then
-      error("'" .. key .. "' is not static field")
-    end
-
-    if meta.__field.__public[key] then
-      error("'" .. key .. "' is not static field")
-    end
+    return class_index(class, class, key)
   end
 
   setmetatable(c, meta)
